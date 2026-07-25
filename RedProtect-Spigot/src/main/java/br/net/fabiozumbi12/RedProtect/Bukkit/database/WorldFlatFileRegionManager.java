@@ -54,12 +54,19 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     // goes through remove()/add() - so an index keyed on those bounds cannot go stale as
     // long as it is maintained in add(), remove() and clearRegions().
     private final Map<Long, Set<Region>> chunkIndex;
+    // A region covering more chunks than this is not indexed per chunk - it is kept here
+    // and scanned on every lookup instead. Without this cap a single huge region (an admin
+    // region over a whole world, say) would try to register millions of chunk entries at
+    // load time. Such regions are rare, so this list stays short.
+    private final Set<Region> unindexedLargeRegions;
+    private static final long MAX_INDEXED_CHUNKS = 1024L;
     private final String world;
 
     public WorldFlatFileRegionManager(String world) {
         super();
         this.regions = new HashMap<>();
         this.chunkIndex = new HashMap<>();
+        this.unindexedLargeRegions = new HashSet<>();
         this.world = world;
     }
 
@@ -336,16 +343,32 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     }
 
     private void indexAdd(Region region) {
-        forEachChunk(region, (key) -> chunkIndex.computeIfAbsent(key, k -> new HashSet<>()).add(region));
+        if (chunkFootprint(region) > MAX_INDEXED_CHUNKS) {
+            unindexedLargeRegions.add(region);
+            return;
+        }
+        // Sized to 2: the overwhelming majority of chunks are covered by a single region,
+        // and a default-capacity HashSet per chunk costs several times more memory.
+        forEachChunk(region, (key) -> chunkIndex.computeIfAbsent(key, k -> new HashSet<>(2)).add(region));
     }
 
     private void indexRemove(Region region) {
+        if (unindexedLargeRegions.remove(region)) {
+            return;
+        }
         forEachChunk(region, (key) -> {
             Set<Region> inChunk = chunkIndex.get(key);
             if (inChunk != null && inChunk.remove(region) && inChunk.isEmpty()) {
                 chunkIndex.remove(key);
             }
         });
+    }
+
+    /** Number of chunks the region's horizontal MBR covers, as a long to avoid overflow. */
+    private static long chunkFootprint(Region region) {
+        long chunksX = (long) (region.getMaxMbrX() >> 4) - (region.getMinMbrX() >> 4) + 1L;
+        long chunksZ = (long) (region.getMaxMbrZ() >> 4) - (region.getMinMbrZ() >> 4) + 1L;
+        return chunksX * chunksZ;
     }
 
     private void forEachChunk(Region region, java.util.function.LongConsumer action) {
@@ -367,7 +390,17 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
      */
     private Collection<Region> candidatesAt(int x, int z) {
         Set<Region> inChunk = chunkIndex.get(chunkKey(x >> 4, z >> 4));
-        return inChunk == null ? Collections.emptySet() : inChunk;
+        if (unindexedLargeRegions.isEmpty()) {
+            return inChunk == null ? Collections.emptySet() : inChunk;
+        }
+        if (inChunk == null) {
+            return unindexedLargeRegions;
+        }
+        // A region is in exactly one of the two collections, so this cannot duplicate.
+        List<Region> candidates = new ArrayList<>(inChunk.size() + unindexedLargeRegions.size());
+        candidates.addAll(inChunk);
+        candidates.addAll(unindexedLargeRegions);
+        return candidates;
     }
 
     @Override
@@ -553,6 +586,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     public void clearRegions() {
         regions.clear();
         chunkIndex.clear();
+        unindexedLargeRegions.clear();
     }
 
     @Override
