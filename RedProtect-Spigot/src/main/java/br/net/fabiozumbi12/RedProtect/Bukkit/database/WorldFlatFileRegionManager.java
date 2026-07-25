@@ -45,12 +45,26 @@ import java.util.stream.Collectors;
 public class WorldFlatFileRegionManager implements WorldRegionManager {
 
     private final HashMap<String, Region> regions;
+    // Spatial index: chunk -> regions whose horizontal MBR touches that chunk.
+    // Point lookups (getRegions/getTopRegion/getLowRegion/getGroupRegion) run on every
+    // PlayerMoveEvent, so scanning every region in the world does not scale: a world with
+    // a few thousand regions spends most of its move-handling time walking this map.
+    // Regions are identity-compared (Region declares no equals/hashCode), and their
+    // horizontal bounds are immutable once constructed - redefine builds a new Region and
+    // goes through remove()/add() - so an index keyed on those bounds cannot go stale as
+    // long as it is maintained in add(), remove() and clearRegions().
+    private final Map<Long, Set<Region>> chunkIndex;
     private final String world;
 
     public WorldFlatFileRegionManager(String world) {
         super();
         this.regions = new HashMap<>();
+        this.chunkIndex = new HashMap<>();
         this.world = world;
+    }
+
+    private static long chunkKey(int chunkX, int chunkZ) {
+        return ((long) chunkX << 32) | (chunkZ & 0xffffffffL);
     }
 
     private static Set<PlayerRegion> parsePlayerRegionSet(List<String> entries, String serverName, String rname) {
@@ -286,7 +300,13 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
 
     @Override
     public void add(Region region) {
-        regions.put(region.getName(), region);
+        Region previous = regions.put(region.getName(), region);
+        // A same-named region being replaced (rename/redefine reuses the name) must leave
+        // the index, otherwise the stale object keeps answering lookups.
+        if (previous != null && previous != region) {
+            indexRemove(previous);
+        }
+        indexAdd(region);
     }
 
     @Override
@@ -294,6 +314,42 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
         if (regions.containsValue(region)) {
             regions.remove(region.getName());
         }
+        indexRemove(region);
+    }
+
+    private void indexAdd(Region region) {
+        forEachChunk(region, (key) -> chunkIndex.computeIfAbsent(key, k -> new HashSet<>()).add(region));
+    }
+
+    private void indexRemove(Region region) {
+        forEachChunk(region, (key) -> {
+            Set<Region> inChunk = chunkIndex.get(key);
+            if (inChunk != null && inChunk.remove(region) && inChunk.isEmpty()) {
+                chunkIndex.remove(key);
+            }
+        });
+    }
+
+    private void forEachChunk(Region region, java.util.function.LongConsumer action) {
+        // Arithmetic shift is intentional: block -1 belongs to chunk -1.
+        int minChunkX = region.getMinMbrX() >> 4;
+        int maxChunkX = region.getMaxMbrX() >> 4;
+        int minChunkZ = region.getMinMbrZ() >> 4;
+        int maxChunkZ = region.getMaxMbrZ() >> 4;
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                action.accept(chunkKey(chunkX, chunkZ));
+            }
+        }
+    }
+
+    /**
+     * Regions that could contain the given horizontal position. Callers still have to test
+     * the exact bounds (including Y); this only narrows the candidate set.
+     */
+    private Collection<Region> candidatesAt(int x, int z) {
+        Set<Region> inChunk = chunkIndex.get(chunkKey(x >> 4, z >> 4));
+        return inChunk == null ? Collections.emptySet() : inChunk;
     }
 
     @Override
@@ -387,7 +443,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     @Override
     public Set<Region> getRegions(int x, int y, int z) {
         Set<Region> regionl = new HashSet<>();
-        regions.values().forEach(r -> {
+        candidatesAt(x, z).forEach(r -> {
             if (x <= r.getMaxMbrX() &&
                     x >= r.getMinMbrX() &&
                     y <= r.getMaxY() &&
@@ -404,7 +460,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     public Region getTopRegion(int x, int y, int z) {
         Map<Integer, Region> regionlist = new HashMap<>();
         int max = 0;
-        for (Region r : regions.values()) {
+        for (Region r : candidatesAt(x, z)) {
             if (x <= r.getMaxMbrX() && x >= r.getMinMbrX() && y <= r.getMaxY() && y >= r.getMinY() && z <= r.getMaxMbrZ() && z >= r.getMinMbrZ()) {
                 if (regionlist.containsKey(r.getPrior())) {
                     Region reg1 = regionlist.get(r.getPrior());
@@ -428,7 +484,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     public Region getLowRegion(int x, int y, int z) {
         Map<Integer, Region> regionlist = new HashMap<>();
         int min = 0;
-        for (Region r : regions.values()) {
+        for (Region r : candidatesAt(x, z)) {
             if (x <= r.getMaxMbrX() && x >= r.getMinMbrX() && y <= r.getMaxY() && y >= r.getMinY() && z <= r.getMaxMbrZ() && z >= r.getMinMbrZ()) {
                 if (regionlist.containsKey(r.getPrior())) {
                     Region reg1 = regionlist.get(r.getPrior());
@@ -451,7 +507,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     @Override
     public Map<Integer, Region> getGroupRegion(int x, int y, int z) {
         Map<Integer, Region> regionlist = new HashMap<>();
-        for (Region r : regions.values()) {
+        for (Region r : candidatesAt(x, z)) {
             if (x <= r.getMaxMbrX() && x >= r.getMinMbrX() && y <= r.getMaxY() && y >= r.getMinY() && z <= r.getMaxMbrZ() && z >= r.getMinMbrZ()) {
                 if (regionlist.containsKey(r.getPrior())) {
                     Region reg1 = regionlist.get(r.getPrior());
@@ -478,6 +534,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     @Override
     public void clearRegions() {
         regions.clear();
+        chunkIndex.clear();
     }
 
     @Override
