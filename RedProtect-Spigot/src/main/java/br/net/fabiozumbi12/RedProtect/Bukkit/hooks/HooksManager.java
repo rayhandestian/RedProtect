@@ -96,6 +96,9 @@ public class HooksManager {
             }
             if (checkWe()) {
                 RedProtect.get().logger.info("WorldEdit found. Hooked.");
+                if (checkFAWE()) {
+                    RedProtect.get().logger.info("FastAsyncWorldEdit found. Enabling async operations.");
+                }
             }
             if (checkWG()) {
                 RedProtect rp = RedProtect.get();
@@ -281,5 +284,10 @@ public class HooksManager {
             }
         }
         return false;
+    }
+
+    public boolean checkFAWE() {
+        Plugin p = Bukkit.getPluginManager().getPlugin("FastAsyncWorldEdit");
+        return p != null && p.isEnabled();
     }
 }
