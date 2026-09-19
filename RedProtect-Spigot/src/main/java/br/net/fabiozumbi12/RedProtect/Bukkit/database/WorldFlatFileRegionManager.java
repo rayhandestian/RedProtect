@@ -45,12 +45,23 @@ import java.util.stream.Collectors;
 public class WorldFlatFileRegionManager implements WorldRegionManager {
 
     private final HashMap<String, Region> regions;
+    // Point lookups examine only regions overlapping the requested chunk. Maintain this index when regions are added, replaced, removed, or cleared.
+    private final Map<Long, Set<Region>> chunkIndex;
+    // Keep oversized regions separate so loading a world-wide region cannot allocate millions of chunk entries.
+    private final Set<Region> unindexedLargeRegions;
+    private static final long MAX_INDEXED_CHUNKS = 1024L;
     private final String world;
 
     public WorldFlatFileRegionManager(String world) {
         super();
         this.regions = new HashMap<>();
+        this.chunkIndex = new HashMap<>();
+        this.unindexedLargeRegions = new HashSet<>();
         this.world = world;
+    }
+
+    private static long chunkKey(int chunkX, int chunkZ) {
+        return ((long) chunkX << 32) | (chunkZ & 0xffffffffL);
     }
 
     private static Set<PlayerRegion> parsePlayerRegionSet(List<String> entries, String serverName, String rname) {
@@ -286,7 +297,11 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
 
     @Override
     public void add(Region region) {
-        regions.put(region.getName(), region);
+        Region previous = regions.put(region.getName(), region);
+        if (previous != null && previous != region) {
+            indexRemove(previous);
+        }
+        indexAdd(region);
     }
 
     @Override
@@ -294,6 +309,60 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
         if (regions.containsValue(region)) {
             regions.remove(region.getName());
         }
+        indexRemove(region);
+    }
+
+    private void indexAdd(Region region) {
+        if (chunkFootprint(region) > MAX_INDEXED_CHUNKS) {
+            unindexedLargeRegions.add(region);
+            return;
+        }
+        forEachChunk(region, (key) -> chunkIndex.computeIfAbsent(key, k -> new HashSet<>(2)).add(region));
+    }
+
+    private void indexRemove(Region region) {
+        if (unindexedLargeRegions.remove(region)) {
+            return;
+        }
+        forEachChunk(region, (key) -> {
+            Set<Region> inChunk = chunkIndex.get(key);
+            if (inChunk != null && inChunk.remove(region) && inChunk.isEmpty()) {
+                chunkIndex.remove(key);
+            }
+        });
+    }
+
+    private static long chunkFootprint(Region region) {
+        long chunksX = (long) (region.getMaxMbrX() >> 4) - (region.getMinMbrX() >> 4) + 1L;
+        long chunksZ = (long) (region.getMaxMbrZ() >> 4) - (region.getMinMbrZ() >> 4) + 1L;
+        return chunksX * chunksZ;
+    }
+
+    private void forEachChunk(Region region, java.util.function.LongConsumer action) {
+        // Arithmetic shift keeps negative block coordinates in the correct chunk.
+        int minChunkX = region.getMinMbrX() >> 4;
+        int maxChunkX = region.getMaxMbrX() >> 4;
+        int minChunkZ = region.getMinMbrZ() >> 4;
+        int maxChunkZ = region.getMaxMbrZ() >> 4;
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                action.accept(chunkKey(chunkX, chunkZ));
+            }
+        }
+    }
+
+    private Collection<Region> candidatesAt(int x, int z) {
+        Set<Region> inChunk = chunkIndex.get(chunkKey(x >> 4, z >> 4));
+        if (unindexedLargeRegions.isEmpty()) {
+            return inChunk == null ? Collections.emptySet() : inChunk;
+        }
+        if (inChunk == null) {
+            return unindexedLargeRegions;
+        }
+        List<Region> candidates = new ArrayList<>(inChunk.size() + unindexedLargeRegions.size());
+        candidates.addAll(inChunk);
+        candidates.addAll(unindexedLargeRegions);
+        return candidates;
     }
 
     @Override
@@ -387,7 +456,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     @Override
     public Set<Region> getRegions(int x, int y, int z) {
         Set<Region> regionl = new HashSet<>();
-        regions.values().forEach(r -> {
+        candidatesAt(x, z).forEach(r -> {
             if (x <= r.getMaxMbrX() &&
                     x >= r.getMinMbrX() &&
                     y <= r.getMaxY() &&
@@ -404,7 +473,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     public Region getTopRegion(int x, int y, int z) {
         Map<Integer, Region> regionlist = new HashMap<>();
         int max = 0;
-        for (Region r : regions.values()) {
+        for (Region r : candidatesAt(x, z)) {
             if (x <= r.getMaxMbrX() && x >= r.getMinMbrX() && y <= r.getMaxY() && y >= r.getMinY() && z <= r.getMaxMbrZ() && z >= r.getMinMbrZ()) {
                 if (regionlist.containsKey(r.getPrior())) {
                     Region reg1 = regionlist.get(r.getPrior());
@@ -428,7 +497,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     public Region getLowRegion(int x, int y, int z) {
         Map<Integer, Region> regionlist = new HashMap<>();
         int min = 0;
-        for (Region r : regions.values()) {
+        for (Region r : candidatesAt(x, z)) {
             if (x <= r.getMaxMbrX() && x >= r.getMinMbrX() && y <= r.getMaxY() && y >= r.getMinY() && z <= r.getMaxMbrZ() && z >= r.getMinMbrZ()) {
                 if (regionlist.containsKey(r.getPrior())) {
                     Region reg1 = regionlist.get(r.getPrior());
@@ -451,7 +520,7 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     @Override
     public Map<Integer, Region> getGroupRegion(int x, int y, int z) {
         Map<Integer, Region> regionlist = new HashMap<>();
-        for (Region r : regions.values()) {
+        for (Region r : candidatesAt(x, z)) {
             if (x <= r.getMaxMbrX() && x >= r.getMinMbrX() && y <= r.getMaxY() && y >= r.getMinY() && z <= r.getMaxMbrZ() && z >= r.getMinMbrZ()) {
                 if (regionlist.containsKey(r.getPrior())) {
                     Region reg1 = regionlist.get(r.getPrior());
@@ -478,6 +547,8 @@ public class WorldFlatFileRegionManager implements WorldRegionManager {
     @Override
     public void clearRegions() {
         regions.clear();
+        chunkIndex.clear();
+        unindexedLargeRegions.clear();
     }
 
     @Override

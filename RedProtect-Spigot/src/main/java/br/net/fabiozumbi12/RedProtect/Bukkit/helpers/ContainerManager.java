@@ -42,6 +42,24 @@ import java.util.List;
 
 public class ContainerManager {
 
+    public boolean isProtectedSign(Sign sign) {
+        if (!RedProtect.get().getConfigManager().configRoot().private_cat.use || !isSign(sign.getBlock())) {
+            return false;
+        }
+        String[] lines = sign.getSide(Side.FRONT).getLines();
+        return validatePrivateSign(lines) || validatePublicSign(lines);
+    }
+
+    public boolean canEditSign(Sign sign, Player player) {
+        if (!isProtectedSign(sign)) {
+            return true;
+        }
+        String owner = sign.getSide(Side.FRONT).getLine(1);
+        return (!owner.isEmpty() && owner.equalsIgnoreCase(player.getName()))
+                || player.hasPermission("redprotect.bypass")
+                || RedProtect.get().getPermissionHandler().hasPermOrBypass(player, "redprotect.bypass.private");
+    }
+
     public boolean canOpen(Block b, Player p, boolean pubOnly) {
         if (!RedProtect.get().getConfigManager().configRoot().private_cat.use || p.hasPermission("redprotect.bypass")) {
             return true;

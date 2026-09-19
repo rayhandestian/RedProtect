@@ -33,6 +33,7 @@ import br.net.fabiozumbi12.RedProtect.Bukkit.helpers.ContainerManager;
 import br.net.fabiozumbi12.RedProtect.Bukkit.region.RegionBuilder;
 import br.net.fabiozumbi12.RedProtect.Core.config.CoreConfigManager;
 import br.net.fabiozumbi12.RedProtect.Core.helpers.LogLevel;
+import io.papermc.paper.event.player.PlayerOpenSignEvent;
 import org.bukkit.*;
 import org.bukkit.block.*;
 import org.bukkit.block.sign.Side;
@@ -88,6 +89,14 @@ public class BlockListener implements Listener {
     }
 
     @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGH)
+    public void onSignOpen(PlayerOpenSignEvent e) {
+        if (!cont.canEditSign(e.getSign(), e.getPlayer())) {
+            e.setCancelled(true);
+            RedProtect.get().getLanguageManager().sendMessage(e.getPlayer(), "playerlistener.region.cantinteract");
+        }
+    }
+
+    @EventHandler(ignoreCancelled = true, priority = EventPriority.HIGH)
     public void onSignPlace(SignChangeEvent e) {
         RedProtect.get().logger.debug(LogLevel.BLOCKS, "BlockListener - Is SignChangeEvent event!");
 
@@ -103,6 +112,15 @@ public class BlockListener implements Listener {
             e.setCancelled(true);
             return;
         }
+
+        // Check the saved sign before submitted text can remove or replace its lock.
+        Sign existingSign = (Sign) b.getState();
+        if (!cont.canEditSign(existingSign, p)) {
+            e.setCancelled(true);
+            RedProtect.get().getLanguageManager().sendMessage(p, "playerlistener.region.cantinteract");
+            return;
+        }
+        String existingOwner = cont.isProtectedSign(existingSign) ? existingSign.getSide(Side.FRONT).getLine(1) : null;
 
         String[] lines = e.getLines();
         String line1 = lines[0];
@@ -130,6 +148,13 @@ public class BlockListener implements Listener {
         }
 
         if ((RedProtect.get().getConfigManager().configRoot().private_cat.use && b.getType().name().contains("WALL_SIGN"))) {
+            // Container locks are read from the front only. Back-side edits must not create locks, replace owners, or break the sign as failed creations.
+            if (e.getSide() != Side.FRONT) {
+                return;
+            }
+            if (existingOwner != null && (cont.validatePrivateSign(e.getLines()) || cont.validatePublicSign(e.getLines()))) {
+                e.setLine(1, existingOwner);
+            }
             boolean out = RedProtect.get().getConfigManager().configRoot().private_cat.allow_outside;
             if (cont.validatePrivateSign(e.getLines())) {
                 if (out || signr != null) {
@@ -152,7 +177,7 @@ public class BlockListener implements Listener {
                             length = 16;
                         }
                         e.setLine(0, RedProtect.get().getLanguageManager().get("blocklistener.container.signline"));
-                        e.setLine(1, p.getName().substring(0, length));
+                        e.setLine(1, existingOwner != null ? existingOwner : p.getName().substring(0, length));
                         RedProtect.get().getLanguageManager().sendMessage(p, "blocklistener.container.protected");
                     } else {
                         RedProtect.get().getLanguageManager().sendMessage(p, "blocklistener.container.notprotected");
@@ -184,7 +209,7 @@ public class BlockListener implements Listener {
                             length = 16;
                         }
                         e.setLine(0, RedProtect.get().getLanguageManager().get("blocklistener.container.signline.public"));
-                        e.setLine(1, p.getName().substring(0, length));
+                        e.setLine(1, existingOwner != null ? existingOwner : p.getName().substring(0, length));
                         RedProtect.get().getLanguageManager().sendMessage(p, "blocklistener.container.public");
                     } else {
                         RedProtect.get().getLanguageManager().sendMessage(p, "blocklistener.container.notprotected");
