@@ -56,12 +56,13 @@ import org.bukkit.entity.Player;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
-import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class WEHook {
 
-    private static final HashMap<String, EditSession> eSessions = new HashMap<>();
+    private static final Map<String, EditSession> eSessions = new ConcurrentHashMap<>();
 
     public static boolean undo(String rid) {
         if (eSessions.containsKey(rid)) {
@@ -206,39 +207,55 @@ public class WEHook {
     }
 
     public static void regenRegion(final Region region, final World world, final Location p1, final Location p2, final int delay, final CommandSender sender, final boolean remove) {
-        Bukkit.getScheduler().scheduleSyncDelayedTask(RedProtect.get(), () -> {
-            if (RedProtect.get().getUtil().stopRegen) {
-                return;
+        if (RedProtect.get().hooks.checkFAWE()) {
+            Bukkit.getScheduler().runTaskLaterAsynchronously(RedProtect.get(), () -> {
+                performRegen(region, world, p1, p2, delay, sender, remove, true);
+            }, delay);
+        } else {
+            Bukkit.getScheduler().scheduleSyncDelayedTask(RedProtect.get(), () -> {
+                performRegen(region, world, p1, p2, delay, sender, remove, false);
+            }, delay);
+        }
+    }
+
+    private static void performRegen(Region region, World world, Location p1, Location p2, int delay, CommandSender sender, boolean remove, boolean async) {
+        if (RedProtect.get().getUtil().stopRegen) {
+            return;
+        }
+
+        RegionSelector regs = new LocalSession().getRegionSelector(new BukkitWorld(world));
+        regs.selectPrimary(BlockVector3.at(p1.getX(), p1.getY(), p1.getZ()), null);
+        regs.selectSecondary(BlockVector3.at(p2.getX(), p2.getY(), p2.getZ()), null);
+
+        com.sk89q.worldedit.regions.Region wReg;
+        try {
+            wReg = regs.getRegion();
+        } catch (IncompleteRegionException e1) {
+            e1.printStackTrace();
+            return;
+        }
+
+        try (EditSession eSession = WorldEdit.getInstance().getEditSessionFactory().getEditSession(new BukkitWorld(world), -1)) {
+            eSessions.put(region.getID(), eSession);
+            int delayCount = 1 + delay / 10;
+
+            com.sk89q.worldedit.world.World wRegWorld = wReg.getWorld();
+            if (wRegWorld == null) return;
+
+            boolean success = wRegWorld.regenerate(wReg, eSession);
+            if (success && sender == null) {
+                eSession.setMask(null);
             }
 
-            RegionSelector regs = new LocalSession().getRegionSelector(new BukkitWorld(world));
-            regs.selectPrimary(BlockVector3.at(p1.getX(), p1.getY(), p1.getZ()), null);
-            regs.selectSecondary(BlockVector3.at(p2.getX(), p2.getY(), p2.getZ()), null);
-
-            com.sk89q.worldedit.regions.Region wReg;
-            try {
-                wReg = regs.getRegion();
-            } catch (IncompleteRegionException e1) {
-                e1.printStackTrace();
-                return;
-            }
-
-            try (EditSession eSession = WorldEdit.getInstance().getEditSessionFactory().getEditSession(new BukkitWorld(world), -1)) {
-                eSessions.put(region.getID(), eSession);
-                int delayCount = 1 + delay / 10;
-
-                com.sk89q.worldedit.world.World wRegWorld = wReg.getWorld();
-                if (wRegWorld == null) return;
-
+            Runnable postAction = () -> {
                 if (sender != null) {
-                    if (wRegWorld.regenerate(wReg, eSession)) {
+                    if (success) {
                         RedProtect.get().getLanguageManager().sendMessage(sender, "[" + delayCount + "]" + " &aRegion " + region.getID().split("@")[0] + " regenerated with success!");
                     } else {
                         RedProtect.get().getLanguageManager().sendMessage(sender, "[" + delayCount + "]" + " &cTheres an error when regen the region " + region.getID().split("@")[0] + "!");
                     }
                 } else {
-                    if (wRegWorld.regenerate(wReg, eSession)) {
-                        eSession.setMask(null);
+                    if (success) {
                         RedProtect.get().logger.warning("[" + delayCount + "]" + " &aRegion " + region.getID().split("@")[0] + " regenerated with success!");
                     } else {
                         RedProtect.get().logger.warning("[" + delayCount + "]" + " &cTheres an error when regen the region " + region.getID().split("@")[0] + "!");
@@ -255,13 +272,19 @@ public class WEHook {
                 }
 
                 if (RedProtect.get().getConfigManager().configRoot().purge.regen.stop_server_every > 0 && delayCount > RedProtect.get().getConfigManager().configRoot().purge.regen.stop_server_every) {
-
                     Bukkit.getScheduler().cancelTasks(RedProtect.get());
                     RedProtect.get().getRegionManager().saveAll(false);
-
                     Bukkit.getServer().shutdown();
                 }
+            };
+
+            if (async) {
+                Bukkit.getScheduler().runTask(RedProtect.get(), postAction);
+            } else {
+                postAction.run();
             }
-        }, delay);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
     }
 }
